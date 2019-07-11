@@ -16,11 +16,13 @@
 LOG_PATH=${HOME}/.healthchecks
 LOG_FILE=wrap_cmd
 
-mkdir -p ${LOG_PATH} > /dev/null
-rm ${LOG_PATH}/${LOG_FILE} > /dev/null
+if [[ ${HC_DEBUG} ]]; then
+  mkdir -p ${LOG_PATH} > /dev/null
+  rm ${LOG_PATH}/${LOG_FILE} > /dev/null
+fi
 log_cmd()
 {
-  if [[ -v HC_DEBUG ]]; then
+  if [[ ${HC_DEBUG} ]]; then
     echo "[${LOGNAME}][`date -Is`] - ${*}" >> ${LOG_PATH}/${LOG_FILE}
   fi
 }
@@ -158,8 +160,9 @@ poll_server()
 }
 
 #### ########
-
-env > ${LOG_PATH}/wrap_vars
+if [[ ${HC_DEBUG} ]]; then
+  env > ${LOG_PATH}/wrap_vars
+fi
 log_cmd "$@"
 # get rid of the '-c'
 shift
@@ -170,7 +173,9 @@ log_cmd "hc_command: $hc_command"
 
 parse_config $config_file
 
-declare -p API_KEY HC_API_URL ping_urls >> ${LOG_PATH}/${LOG_FILE}
+if [[ ${HC_DEBUG} ]]; then
+  declare -p API_KEY HC_API_URL ping_urls >> ${LOG_PATH}/${LOG_FILE}
+fi
 
 get_ping_url "$hc_name"
 
@@ -181,10 +186,12 @@ exec 5>&1
 hc_out=$( $OLD_SHELL -c "$hc_command" |& tee /dev/fd/5; exit ${PIPESTATUS[-2]} )
 hc_exit=$?
 
-log_cmd "hc_exit: $hc_exit"
-log_cmd "hc_out-"
-echo "${hc_out}" >> ${LOG_PATH}/${LOG_FILE}
-log_cmd "hc_out-"
+if [[ ${HC_DEBUG} ]]; then
+  log_cmd "hc_exit: $hc_exit"
+  log_cmd "hc_out-"
+  echo "${hc_out}" >> ${LOG_PATH}/${LOG_FILE}
+  log_cmd "hc_out-"
+fi
 
 fail_tag=
 if [[ ${hc_exit} -ne 0 ]]; then
@@ -193,8 +200,3 @@ fi
   
 poll_server "${hc_ping_url}${fail_tag}" "${hc_out}"
 
-#exec 5>&1
-#FF=$(ls /taco/ 2>&1 |tee /dev/fd/5; exit ${PIPESTATUS[0]})
-#exit_code=$?
-#echo "$FF"
-#echo "Exit Code: $exit_code"
