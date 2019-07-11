@@ -1,0 +1,200 @@
+#!/bin/bash
+# Usage:
+# Replace the CRON shell with this script.
+# In the crontab set to call this wrapper instead of "sh"
+#    SHELL=.../log_wrap
+# and tell us the previous shell cron used
+#    OLD_SHELL = /bin/sh
+#
+# Then the cron record format changes to
+# m h    dom mon dow    check name     command
+# 23 *    *   *   *     "server online" df -h
+# 64 21   *   *   *     "server backup" /root/backup --onedisk /
+
+
+#### Logging
+LOG_PATH=${HOME}/.healthchecks
+LOG_FILE=wrap_cmd
+
+mkdir -p ${LOG_PATH} > /dev/null
+rm ${LOG_PATH}/${LOG_FILE} > /dev/null
+log_cmd()
+{
+  if [[ -v HC_DEBUG ]]; then
+    echo "[${LOGNAME}][`date -Is`] - ${*}" >> ${LOG_PATH}/${LOG_FILE}
+  fi
+}
+
+#### command split
+hc_name=
+hc_command=
+
+split_name_command()
+{
+  local argv="$@"
+  # Quotes surround name
+  local pattern_1='^\"(.*)\" (.*)$'
+  # One word name
+  local pattern_2='^(\w+) (.*)$'
+  
+  if [[ $argv =~ ${pattern_1} ]]; then
+    hc_name=${BASH_REMATCH[1]}
+    hc_command="${BASH_REMATCH[2]}"
+  elif [[ $argv =~ ${pattern_2} ]]; then
+    hc_name=${BASH_REMATCH[1]}
+    hc_command="${BASH_REMATCH[2]}"  
+  fi
+}
+
+#### Settings
+# settings will be read from:
+# $HOME/.hc_wrap_config
+# /etc/healthchecks_config (optional)
+# crontab variables
+config_file=${HOME}/.hc_wrap_config
+
+# create a template config file if it does not yet exist
+if [[ ! -r $config_file ]]; then
+  cat << EOF > $config_file
+# The API key for accessing the server 
+#API_KEY=sUHYjHWeyJ8yRbbpvtbhw7cIDrVEfpQi
+
+# The api URL for querying the server
+#HC_API_URL=https://hc-ping.com/api/v1/checks
+
+# e.g. https://hc-ping.com/b6f811ed-1718-4538-bd36-4f4b7376596a
+#https://hc-ping.com/b6f811ed-1718-4538-bd36-4f4b7376596a = server online
+#https://hc-ping.com/63219b04-4072-431a-a7c0-d5336d1a431b = server backup
+
+EOF
+fi
+
+# called with config file name
+parse_config()
+{
+  if [[ ! -r $1 ]]; then
+    return
+  fi
+  
+  local lhs rhs
+  while IFS='= ' read -r lhs rhs
+  do
+    if [[ ! $lhs =~ ^\ *# && -n $lhs ]]; then
+      rhs="${rhs%%\#*}"    # Del in line right comments
+      rhs="${rhs%%*( )}"   # Del trailing spaces
+      rhs="${rhs%\"*}"     # Del opening string quotes 
+      rhs="${rhs#\"*}"     # Del closing string quotes 
+      set_config $lhs "$rhs"
+    fi
+  done < $1
+}
+
+declare API_KEY HC_API_URL
+declare -A ping_urls
+set_config()
+{
+  log_cmd "config - $@"
+  case $1 in
+    API_KEY) API_KEY=$2 ;;
+    HC_API_URL) HC_API_URL=$2 ;;
+    *)
+      ping_urls["$2"]="$1"
+      ;;
+  esac
+}
+
+#### Get ping url
+hc_ping_url=
+# called with task name
+get_ping_url()
+{
+  hc_ping_url=${ping_urls["$1"]}
+  if [[ -n $hc_ping_url ]]; then
+    log_cmd "Found url: $hc_ping_url"
+    return
+  fi
+  log_cmd "Create url for: $1"
+  local response data
+#  "api_key": "${API_KEY}", 
+
+  read -r -d '' data << EOF
+{ 
+  "name": "${hc_name}", 
+  "unique": ["name"], 
+  "timeout": 86400,
+  "channels": "*"
+}
+EOF
+  log_cmd "$data"
+  response=$( 
+    curl ${HC_API_URL} \
+      --header "X-Api-Key: ${API_KEY}" \
+      --data "${data}"
+  )
+  local response_status=$?
+  log_cmd "response - $response_status $response"
+  if [[ $response_status -ne 0 ]]; then
+    log_cmd "error connecting to server api"
+    return
+  fi
+
+  # response comes back as a single line
+  hc_ping_url=$(echo "${response}" | jq --raw-output '.ping_url' )
+  log_cmd "hc_ping_url: $hc_ping_url"
+  if [[ -n $hc_ping_url ]]; then
+    echo "${hc_ping_url} = $1" >> $config_file
+  fi
+}
+
+#### Poll server
+poll_server()
+{
+  log_cmd "poll: $1"
+  # server logs the first 10k
+  echo "${2:0:10000}" |
+  curl -fsS --retry 3 --request POST --data-binary @- $1 >/dev/null
+
+  log_cmd "poll ret $?"
+}
+
+#### ########
+
+env > ${LOG_PATH}/wrap_vars
+log_cmd "$@"
+# get rid of the '-c'
+shift
+split_name_command "$1"
+
+log_cmd "hc_name: $hc_name"
+log_cmd "hc_command: $hc_command"
+
+parse_config $config_file
+
+declare -p API_KEY HC_API_URL ping_urls >> ${LOG_PATH}/${LOG_FILE}
+
+get_ping_url "$hc_name"
+
+poll_server "${hc_ping_url}/start"
+# make fd/5 an ailias of stdout
+exec 5>&1
+
+hc_out=$( $OLD_SHELL -c "$hc_command" |& tee /dev/fd/5; exit ${PIPESTATUS[-2]} )
+hc_exit=$?
+
+log_cmd "hc_exit: $hc_exit"
+log_cmd "hc_out-"
+echo "${hc_out}" >> ${LOG_PATH}/${LOG_FILE}
+log_cmd "hc_out-"
+
+fail_tag=
+if [[ ${hc_exit} -ne 0 ]]; then
+  fail_tag=/fail
+fi
+  
+poll_server "${hc_ping_url}${fail_tag}" "${hc_out}"
+
+#exec 5>&1
+#FF=$(ls /taco/ 2>&1 |tee /dev/fd/5; exit ${PIPESTATUS[0]})
+#exit_code=$?
+#echo "$FF"
+#echo "Exit Code: $exit_code"
