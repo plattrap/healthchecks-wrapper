@@ -35,9 +35,9 @@ split_name_command()
 {
   local argv="$@"
   # Quotes surround name
-  local pattern_1='^\"(.*)\" (.*)$'
+  local pattern_1='^[ 	]*\"(.*)\" (.*)$'
   # One word name
-  local pattern_2='^(\w+) (.*)$'
+  local pattern_2='^[ 	]*(\w+) (.*)$'
   
   if [[ $argv =~ ${pattern_1} ]]; then
     hc_name=${BASH_REMATCH[1]}
@@ -180,10 +180,10 @@ fi
 get_ping_url "$hc_name"
 
 poll_server "${hc_ping_url}/start"
-# make fd/5 an ailias of stdout
+# make fd/5 an alias of stdout
 exec 5>&1
 
-hc_out=$( $OLD_SHELL -c "$hc_command" |& tee /dev/fd/5; exit ${PIPESTATUS[-2]} )
+hc_out=$( $OLD_SHELL -c "$hc_command" |& tee /dev/fd/5 | { head -n 10000; cat >/dev/null; }; exit ${PIPESTATUS[0]} )
 hc_exit=$?
 
 if [[ ${HC_DEBUG} ]]; then
